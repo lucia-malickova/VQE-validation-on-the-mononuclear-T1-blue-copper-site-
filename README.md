@@ -14,9 +14,16 @@ Modular pipeline for the EuroHPC emulator benchmark. Built so the expensive PySC
 - **`plot_report.py`** — Step 3: Convergence plots and final `benchmark_report.txt` generation.
 - **`job.sh`** — SLURM wrapper script for executing high-performance jobs on HPC infrastructure.
 
-## Requirements & Installation
+## Requirements & Installation & Execution Order
 
-Install the required Python dependencies in your virtual environment:
+Install requirements and run the pipeline components in the following logical sequence:
 
 ```bash
 pip install -r requirements.txt
+
+python build_hamiltonian.py
+python run_polymer_interaction.py
+python run_pes_scan.py
+python run_adapt_pes_analysis.py
+python run_vqe.py
+python plot_report.py
