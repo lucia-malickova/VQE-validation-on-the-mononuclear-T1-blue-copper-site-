@@ -13,6 +13,7 @@ Modular pipeline for the EuroHPC emulator benchmark. Built so the expensive PySC
 - **`run_entanglement_analysis.py`** — Reduced active space PES energy profile analysis for Q1 publication benchmarks (`8 qubits`).
 - **`run_adapt_vqe_simulation.py`** — ADAPT-VQE correlated state and Von Neumann entropy simulation across the PES scan.
 - **`run_noisy_aer_simulation.py`** — Optimized Qiskit Aer noisy hardware simulation and error drift analysis across the PES scan.
+- **`run_zne_mitigation.py`** — Zero-Noise Extrapolation (ZNE) error mitigation and noise-scaling analysis for Q1 benchmarks.
 - **`plot_plot_pes_profile.py`** — Generates high-resolution publication energy profile plots (`pes_energy_profile.pdf`, `pes_energy_profile.png`).
 - **`plot_entropy_profile.py`** — Generates high-resolution publication entropy profile plots (`entropy_profile.pdf`, `entropy_profile.png`).
 - **`run_vqe.py`** — Step 2: Reload integrals $\rightarrow$ ideal + noisy VQE execution $\rightarrow$ `artifacts/vqe_history.npz`.
@@ -33,6 +34,7 @@ python run_adapt_pes_analysis.py
 python run_entanglement_analysis.py
 python run_adapt_vqe_simulation.py
 python run_noisy_aer_simulation.py
+python run_zne_mitigation.py
 python plot_plot_pes_profile.py
 python plot_entropy_profile.py
 python run_vqe.py
