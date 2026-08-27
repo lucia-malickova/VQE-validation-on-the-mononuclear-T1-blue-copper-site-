@@ -11,7 +11,9 @@ Modular pipeline for the EuroHPC emulator benchmark. Built so the expensive PySC
 - **`run_pes_scan.py`** — Potential Energy Surface (PES) scan generator for the polymer approaching the active site (`pes_smooth_step_*.FCIDUMP`).
 - **`run_adapt_pes_analysis.py`** — Diagnostic script to inspect PES scan FCIDUMP files, verifying spatial dimensions, orbital counts, and Jordan-Wigner mapped qubit operators.
 - **`run_entanglement_analysis.py`** — Reduced active space PES energy profile analysis for Q1 publication benchmarks (`8 qubits`).
-- **`plot_plot_pes_profile.py`** — Generates high-resolution publication plots (`pes_energy_profile.pdf`, `pes_energy_profile.png`).
+- **`run_adapt_vqe_simulation.py`** — ADAPT-VQE correlated state and Von Neumann entropy simulation across the PES scan.
+- **`plot_plot_pes_profile.py`** — Generates high-resolution publication energy profile plots (`pes_energy_profile.pdf`, `pes_energy_profile.png`).
+- **`plot_entropy_profile.py`** — Generates high-resolution publication entropy profile plots (`entropy_profile.pdf`, `entropy_profile.png`).
 - **`run_vqe.py`** — Step 2: Reload integrals $\rightarrow$ ideal + noisy VQE execution $\rightarrow$ `artifacts/vqe_history.npz`.
 - **`plot_report.py`** — Step 3: Convergence plots and final `benchmark_report.txt` generation.
 - **`job.sh`** — SLURM wrapper script for executing high-performance jobs on HPC infrastructure.
@@ -28,6 +30,8 @@ python run_polymer_interaction.py
 python run_pes_scan.py
 python run_adapt_pes_analysis.py
 python run_entanglement_analysis.py
+python run_adapt_vqe_simulation.py
 python plot_plot_pes_profile.py
+python plot_entropy_profile.py
 python run_vqe.py
 python plot_report.py
