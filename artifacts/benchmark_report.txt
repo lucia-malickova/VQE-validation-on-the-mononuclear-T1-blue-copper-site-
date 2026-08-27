@@ -1,0 +1,12 @@
+==================================================================
+T1 BLUE-COPPER VQE BENCHMARK - SUMMARY
+==================================================================
+Active-space qubits : 6
+Ansatz              : hea
+Transpiled depth    : 27
+Two-qubit gates     : 5
+------------------------------------------------------------------
+CASSCF reference    : -2518.99512911 Eh
+VQE ideal           : -2518.99512853 Eh  (dE=0.000001 Eh, within chemical accuracy)
+VQE noisy           : -2518.73238726 Eh  (dE=0.262742 Eh, ABOVE chemical accuracy)
+==================================================================
