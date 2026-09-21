@@ -1,127 +1,182 @@
-# run_adapt_doublet.py — ADAPT-VQE cielený na správny doubletový spinový stav (S=1/2)
-import numpy as np, time
-import scipy.sparse as sp
-from scipy.sparse.linalg import expm_multiply
+#!/usr/bin/env python3
+"""Spin-pure S=1/2 ADAPT-VQE emulator benchmark for the T1 FCIDUMP.
+
+Key correction relative to the original (pre-v2) version of this script:
+  * the working state lives in the exact S=1/2, M_S=1/2 subspace ker(S_+),
+    not merely the N=15 or M_S=1/2 determinant sector;
+  * the S/D/T candidate pool preserves N_alpha,N_beta and every generator is
+    projected into the pure-doublet subspace;
+  * operator selection is deterministic (one operator per iteration by default);
+  * the exact doublet energy, selected operators, parameters, and residual are saved.
+
+This is an emulator/reference implementation.  A hardware circuit should use
+spin-adapted generators or an explicitly validated spin-symmetry strategy; the
+projected matrices used here are not themselves a hardware decomposition.
+
+See paper Section 2.4 / arXiv:2609.20439v2 for the full methodology.
+"""
+from __future__ import annotations
+import argparse
+import json
+import time
+
+import numpy as np
 from scipy.optimize import minimize
-import config
+from scipy.sparse.linalg import expm_multiply
+
+from spin_fci import (
+    read_fcidump, pure_spin_hamiltonian, sector_hamiltonian,
+    hf_determinant, excitation_specs_from_hf, excitation_generator,
+    spin_square_expectation,
+)
+
+
+def label_spec(spec, norb):
+    rem, add = spec
+    def lab(p):
+        return ("a" if p < norb else "b") + str((p % norb) + 1)
+    return {"remove": [lab(x) for x in rem], "add": [lab(x) for x in add]}
+
 
 def main():
-    d = np.load(config.INTEGRALS_NPZ)
-    e_core = float(d["e_core"]); ncas = int(d["ncas"])
-    n_particles = (int(d["n_alpha"]), int(d["n_beta"])); N = sum(n_particles)
-    
-    print(f"Cielove el. / spinove obsadenie: alpha={n_particles[0]}, beta={n_particles[1]} (Spolu N={N})", flush=True)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("fcidump")
+    ap.add_argument("--max-iters", type=int, default=160)
+    ap.add_argument("--grad-tol", type=float, default=1e-7)
+    ap.add_argument("--energy-tol-meh", type=float, default=1.6)
+    ap.add_argument("--max-rank", type=int, default=3)
+    ap.add_argument("--output", default="adapt_doublet_spin_pure.npz")
+    ap.add_argument("--json", default="adapt_doublet_spin_pure.json")
+    args = ap.parse_args()
 
-    from qiskit_nature.second_q.mappers import JordanWignerMapper
-    from qiskit_nature.second_q.formats.fcidump import FCIDump
-    from qiskit_nature.second_q.formats.fcidump_translator import fcidump_to_problem
-    from qiskit_nature.second_q.operators import FermionicOp
-    from qiskit_nature.second_q.circuit.library import HartreeFock
-    from qiskit.quantum_info import Statevector
+    data = read_fcidump(args.fcidump)
+    nalpha = (data.nelec + data.ms2) // 2
+    nbeta = data.nelec - nalpha
+    ms = 0.5 * (nalpha - nbeta)
+    if abs(ms - 0.5) > 1e-12:
+        raise SystemExit("This reference implementation expects the paper's M_S=1/2 doublet target")
 
-    mapper = JordanWignerMapper()
-    problem = fcidump_to_problem(FCIDump.from_file(config.FCIDUMP))
-    qop = mapper.map(problem.hamiltonian.second_q_op())
-    nq = qop.num_qubits
-    
-    Hfull = qop.to_matrix(sparse=True).tocsr()
-    # Vybereme presne subspace pre N elektronov (Doublet sektor)
-    idx = np.array([i for i in range(2**nq) if bin(i).count("1") == N], dtype=np.int64)
-    Hsub = np.asarray(Hfull[idx][:, idx].todense())
-    
-    evals, evecs = np.linalg.eigh(Hsub)
-    # Spravna referencia pre doublet (najnizsia energia v tomto spinovom sektore)
-    E0 = float(evals[0]) + e_core
-    print(f"Spravna Doublet FCI E0 = {E0:.6f} Eh", flush=True)
+    basis, Hms, U, Hd, Splus = pure_spin_hamiltonian(data, nalpha, nbeta, target_s=0.5)
+    ed = np.linalg.eigvalsh(Hd)
+    E0 = float(ed[0])
 
-    hf_sv = Statevector(HartreeFock(ncas, n_particles, mapper)).data
-    hf_i = int(np.argmax(np.abs(hf_sv)))
-    occ = [i for i in range(nq) if (hf_i >> i) & 1]
-    vir = [i for i in range(nq) if not ((hf_i >> i) & 1)]
-    pos = int(np.where(idx == hf_i)[0][0])
-    
-    psi0 = np.zeros(len(idx), complex); psi0[pos] = 1.0
-    print(f"E(HF) = {float((psi0.conj()@(Hsub@psi0)).real)+e_core:.6f} Eh", flush=True)
-    
-    # Skontrolujeme prekryv s novym spravnym doublet stavom
-    ovl = float(np.abs(evecs[:, 0].conj() @ psi0)**2)
-    print(f"Prekryv |<Doublet_FCI | HF>|^2 = {ovl:.4f} (Musi byt nenulovy!)", flush=True)
+    # Diagnostic quartet energy where available.
+    Eq = np.nan
+    if nalpha < data.norb and nbeta > 0:
+        _, Hq = sector_hamiltonian(data, nalpha + 1, nbeta - 1)
+        Eq = float(np.linalg.eigvalsh(Hq)[0])
 
-    def gen(op_dict):
-        f = FermionicOp(op_dict, num_spin_orbitals=nq)
-        m = mapper.map(f).to_matrix(sparse=True)
-        return sp.csr_matrix(m[idx][:, idx])
-        
-    pool, labels = [], []
-    for a in occ:
-        for r in vir:
-            A = gen({f"+_{r} -_{a}": 1.0, f"+_{a} -_{r}": -1.0})
-            if A.nnz: pool.append(A); labels.append(("S", a, r))
-    for ii in range(len(occ)):
-        for jj in range(ii+1, len(occ)):
-            for kk in range(len(vir)):
-                for ll in range(kk+1, len(vir)):
-                    a, b, r, s = occ[ii], occ[jj], vir[kk], vir[ll]
-                    A = gen({f"+_{r} +_{s} -_{b} -_{a}": 1.0, f"+_{a} +_{b} -_{s} -_{r}": -1.0})
-                    if A.nnz: pool.append(A); labels.append(("D", a, b, r, s))
-                    
-    print(f"Pool = {len(pool)} operatorov (S+D)", flush=True)
+    hfd = hf_determinant(data.norb, nalpha, nbeta)
+    pos = {int(x): i for i, x in enumerate(basis)}[hfd]
+    psi0_ms = np.zeros(len(basis), dtype=complex); psi0_ms[pos] = 1.0
+    phi0 = U.conj().T @ psi0_ms
+    proj_norm = float(np.vdot(phi0, phi0).real)
+    if proj_norm < 1.0 - 1e-10:
+        raise RuntimeError("HF determinant is not a pure doublet: projection norm %.12f" % proj_norm)
+    phi0 /= np.sqrt(proj_norm)
 
-    sel = []
-    theta = np.zeros(0)
+    specs = excitation_specs_from_hf(data.norb, nalpha, nbeta, max_rank=args.max_rank)
+    # For CAS(15e,9o), max_rank=3 must give 323 M_S-preserving non-reference excitations.
+    print("doublet_dim=%d Ms_dim=%d pool_specs=%d E0_doublet=%.12f Eq=%.12f" %
+          (Hd.shape[0], Hms.shape[0], len(specs), E0, Eq), flush=True)
 
-    def obj_and_grad(th):
-        v_list = [psi0]
-        for i, t in enumerate(th):
-            v_list.append(expm_multiply(t * pool[sel[i]], v_list[-1]))
-        psi = v_list[-1]
-        E = float((psi.conj() @ (Hsub @ psi)).real)
-        w = Hsub @ psi
-        grads = np.zeros_like(th)
-        for i in reversed(range(len(th))):
-            A = pool[sel[i]]
-            grads[i] = 2.0 * np.real(np.vdot(w, A @ v_list[i+1]))
-            w = expm_multiply(-th[i] * A, w)
-        return E + e_core, grads
+    Ams_cache = {}
+    Ad_cache = {}
 
-    CHEM = 1.6; MAX_ITERS = 40; K_ADD = 4
-    hist = []; t0 = time.time()
-    
-    for it in range(1, MAX_ITERS+1):
-        v = psi0.copy()
-        for t, k in zip(theta, sel):
-            v = expm_multiply(t * pool[k], v)
-            
-        u = Hsub @ v
-        pool_grads = np.array([abs(2.0*np.real(np.vdot(u, pool[k] @ v))) for k in range(len(pool))])
-        
-        top_indices = np.argsort(pool_grads)[-K_ADD:][::-1]
-        gmax = float(pool_grads[top_indices[0]])
-        
-        if gmax < 1e-5:
-            print(f"[stop] max|grad| = {gmax:.2e}", flush=True); break
-            
-        for kbest in top_indices:
-            sel.append(kbest)
-            
-        theta = np.append(theta, np.random.uniform(-0.001, 0.001, K_ADD))
-        
-        res = minimize(obj_and_grad, theta, method="L-BFGS-B", jac=True, options={"gtol": 1e-6, "ftol": 1e-8, "maxiter": 600})
-        
-        theta = res.x; E = float(res.fun); dev = (E - E0) * 1e3
-        hist.append((len(sel), E, dev, gmax))
-        print(f"iter {it:2d}  ops={len(sel):3d}  E={E:.6f}  dev={dev:9.3f} mEh  gmax={gmax:.2e}", flush=True)
-        
-        if dev < CHEM:
-            print(f"\nSUCCESS: Chemicka presnost dosiahnuta! ({dev:.3f} mEh)", flush=True)
+    def Ams(k):
+        if k not in Ams_cache:
+            Ams_cache[k] = excitation_generator(basis, *specs[k])
+        return Ams_cache[k]
+
+    def Ad(k):
+        if k not in Ad_cache:
+            M = U.conj().T @ (Ams(k) @ U)
+            M = 0.5 * (M - M.conj().T)
+            if not np.all(np.isfinite(M)):
+                raise RuntimeError(f"Ad({k}) obsahuje non-finite hodnoty!")
+            Ad_cache[k] = M
+        return Ad_cache[k]
+
+    selected = []
+    theta = np.zeros(0, dtype=float)
+    history = []
+
+    def build(th):
+        v = phi0.copy()
+        for t, k in zip(th, selected):
+            v = expm_multiply(t * Ad(k), v)
+        return v
+
+    def obj_grad(th):
+        states = [phi0]
+        for t, k in zip(th, selected):
+            states.append(expm_multiply(t * Ad(k), states[-1]))
+        psi = states[-1]
+        w = Hd @ psi
+        E = float(np.vdot(psi, w).real)
+        g = np.zeros(len(th), dtype=float)
+        for i in range(len(th)-1, -1, -1):
+            Ai = Ad(selected[i])
+            g[i] = 2.0 * np.real(np.vdot(w, Ai @ states[i+1]))
+            w = expm_multiply(-th[i] * Ai, w)
+        return E, g
+
+    t0 = time.time()
+    for it in range(1, args.max_iters + 1):
+        phi = build(theta)
+        psi_ms = U @ phi
+        u_ms = Hms @ psi_ms
+        grads = np.full(len(specs), -np.inf, dtype=float)
+        used = set(selected)
+        for k in range(len(specs)):
+            if k in used:
+                continue
+            grads[k] = abs(2.0 * np.real(np.vdot(u_ms, Ams(k) @ psi_ms)))
+        kbest = int(np.argmax(grads))
+        gmax = float(grads[kbest])
+        if not np.isfinite(gmax) or gmax < args.grad_tol:
+            print("[stop] max unused |grad| = %.3e" % gmax, flush=True)
             break
 
-    nS = sum(1 for k in sel if labels[k][0] == "S"); nD = sum(1 for k in sel if labels[k][0] == "D")
-    print(f"\n[circuit] aplikacii={len(sel)} (S={nS}, D={nD})  ~2q brany≈{2*nS+13*nD}", flush=True)
-    np.savez(config.HISTORY_NPZ.replace(".npz", "_adapt.npz"),
-             n_ops=np.array([h[0] for h in hist]), energy=np.array([h[1] for h in hist]),
-             dev_meh=np.array([h[2] for h in hist]), e0_exact=E0, e_casscf=float(d["e_casscf"]))
-    print("[saved] vqe_history_adapt.npz", flush=True)
+        selected.append(kbest)
+        theta = np.append(theta, 0.0)  # deterministic symmetry-preserving start
+        res = minimize(obj_grad, theta, method="L-BFGS-B", jac=True,
+                       options={"gtol": 1e-8, "ftol": 1e-12, "maxiter": 1000, "maxls": 50})
+        theta = np.asarray(res.x, dtype=float)
+        E = float(res.fun)
+        dev = (E - E0) * 1e3
+        phi = build(theta); psi_ms = U @ phi
+        s2 = spin_square_expectation(psi_ms, Splus, ms=0.5)
+        resid = float(np.linalg.norm(Hd @ phi - E * phi))
+        if not all(np.isfinite(x) for x in (E, dev, gmax, s2, resid)) or not np.all(np.isfinite(theta)):
+            raise RuntimeError(f"NON-FINITE na iter={it}: E={E} dev={dev} gmax={gmax} s2={s2} resid={resid}")
+        history.append((len(selected), E, dev, gmax, s2, resid))
+        print("iter=%3d ops=%3d E=%.12f dev=%9.5f mEh gmax=%.3e <S2>=%.12f" %
+              (it, len(selected), E, dev, gmax, s2), flush=True)
+        if not np.isfinite(s2) or abs(s2 - 0.75) > 1e-9:
+            raise RuntimeError("spin-purity regression: <S^2>=%s" % s2)
+        if dev <= args.energy_tol_meh:
+            print("SUCCESS: target energy tolerance reached in pure doublet sector", flush=True)
+            break
+
+    labels = [label_spec(specs[k], data.norb) for k in selected]
+    hist = np.asarray(history, dtype=float) if history else np.empty((0,6), dtype=float)
+    np.savez(args.output, theta=theta, selected=np.asarray(selected, dtype=int), history=hist,
+             e0_doublet=E0, e0_quartet=Eq, doublet_basis=U)
+    with open(args.json, "w", encoding="utf-8") as fh:
+        json.dump({
+            "fcidump": args.fcidump,
+            "e0_doublet_Eh": E0,
+            "e0_quartet_Eh": Eq,
+            "selected_labels": labels,
+            "selected_indices": selected,
+            "theta": theta.tolist(),
+            "history_columns": ["n_ops","energy_Eh","dev_mEh","gmax","S2","residual_norm"],
+            "history": hist.tolist(),
+            "elapsed_s": time.time()-t0,
+        }, fh, indent=2)
+    print("saved %s and %s" % (args.output, args.json), flush=True)
+
 
 if __name__ == "__main__":
     main()
